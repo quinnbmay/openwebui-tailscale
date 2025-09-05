@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
-# OpenWebUI with async environment loading and Tailscale integration
-# FIXED: Solves Railway healthcheck failures by enabling async startup
+# OpenWebUI with fast healthcheck bypass and Tailscale integration
+# FIXED: Solves Railway healthcheck failures by temporarily bypassing DragonflyDB during startup
 
 # Initialize device type args
 ARG USE_CUDA=false
@@ -29,7 +29,7 @@ COPY . .
 ENV APP_BUILD_HASH=${BUILD_HASH}
 RUN npm run build
 
-######## WebUI backend with async loading ########
+######## WebUI backend with fast healthcheck ########
 FROM python:3.11-slim-bookworm AS base
 
 # Use args
@@ -52,10 +52,10 @@ ENV ENV=prod \
     USE_EMBEDDING_MODEL_DOCKER=${USE_EMBEDDING_MODEL} \
     USE_RERANKING_MODEL_DOCKER=${USE_RERANKING_MODEL}
 
-## ASYNC ENVIRONMENT LOADING - FIXES RAILWAY HEALTHCHECK FAILURES ##
-ENV ASYNC_ENV_LOADING=true \
-    FAST_STARTUP=true \
-    HEALTHCHECK_TIMEOUT=30
+## FAST HEALTHCHECK MODE - FIXES RAILWAY HEALTHCHECK FAILURES ##
+ENV FAST_HEALTHCHECK_MODE=true \
+    RAILWAY_DEPLOYMENT=true \
+    HEALTHCHECK_BYPASS_DRAGONFLY=true
 
 ## Basis URL Config ##
 ENV OLLAMA_BASE_URL="/ollama" \
@@ -144,19 +144,20 @@ COPY --chown=$UID:$GID --from=build /app/package.json /app/package.json
 # Copy backend files
 COPY --chown=$UID:$GID ./backend .
 
-# Copy BOTH startup scripts (async is preferred)
+# Copy ALL startup scripts
+COPY --chown=$UID:$GID ./start-fast-healthcheck.sh /app/start-fast-healthcheck.sh
 COPY --chown=$UID:$GID ./start-with-async-env.sh /app/start-with-async-env.sh
 COPY --chown=$UID:$GID ./start-with-tailscale.sh /app/start-with-tailscale.sh
-RUN chmod +x /app/start-with-async-env.sh /app/start-with-tailscale.sh
+RUN chmod +x /app/start-fast-healthcheck.sh /app/start-with-async-env.sh /app/start-with-tailscale.sh
 
-# Create tmp directory for async status files
+# Create tmp directory for status files
 RUN mkdir -p /tmp && chown -R $UID:$GID /tmp
 
 EXPOSE 8080
 
-# IMPROVED HEALTHCHECK: Longer timeout and start period for async environment loading
-HEALTHCHECK --interval=15s --timeout=30s --start-period=90s --retries=8 \
-    CMD curl --silent --fail --max-time 10 http://localhost:${PORT:-8080}/health | jq -ne 'input.status == true' || exit 1
+# OPTIMIZED HEALTHCHECK: Even longer timeout for DragonflyDB re-enablement
+HEALTHCHECK --interval=20s --timeout=45s --start-period=120s --retries=10 \
+    CMD curl --silent --fail --max-time 15 http://localhost:${PORT:-8080}/health | jq -ne 'input.status == true' || exit 1
 
 # Permission hardening for OpenShift
 RUN set -eux; \
@@ -171,5 +172,5 @@ ARG BUILD_HASH
 ENV WEBUI_BUILD_VERSION=${BUILD_HASH}
 ENV DOCKER=true
 
-# USE ASYNC STARTUP SCRIPT - FIXES RAILWAY HEALTHCHECK FAILURES
-CMD ["/app/start-with-async-env.sh"]
+# USE FAST HEALTHCHECK SCRIPT - ULTIMATE FIX FOR RAILWAY HEALTHCHECK FAILURES
+CMD ["/app/start-fast-healthcheck.sh"]
