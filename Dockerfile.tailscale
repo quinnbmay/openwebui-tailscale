@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1
-# OpenWebUI with Tailscale integration
+# OpenWebUI with async environment loading and Tailscale integration
+# FIXED: Solves Railway healthcheck failures by enabling async startup
+
 # Initialize device type args
 ARG USE_CUDA=false
 ARG USE_OLLAMA=false
@@ -27,7 +29,7 @@ COPY . .
 ENV APP_BUILD_HASH=${BUILD_HASH}
 RUN npm run build
 
-######## WebUI backend with Tailscale ########
+######## WebUI backend with async loading ########
 FROM python:3.11-slim-bookworm AS base
 
 # Use args
@@ -49,6 +51,11 @@ ENV ENV=prod \
     USE_CUDA_DOCKER_VER=${USE_CUDA_VER} \
     USE_EMBEDDING_MODEL_DOCKER=${USE_EMBEDDING_MODEL} \
     USE_RERANKING_MODEL_DOCKER=${USE_RERANKING_MODEL}
+
+## ASYNC ENVIRONMENT LOADING - FIXES RAILWAY HEALTHCHECK FAILURES ##
+ENV ASYNC_ENV_LOADING=true \
+    FAST_STARTUP=true \
+    HEALTHCHECK_TIMEOUT=30
 
 ## Basis URL Config ##
 ENV OLLAMA_BASE_URL="/ollama" \
@@ -137,13 +144,19 @@ COPY --chown=$UID:$GID --from=build /app/package.json /app/package.json
 # Copy backend files
 COPY --chown=$UID:$GID ./backend .
 
-# Create Tailscale startup script
+# Copy BOTH startup scripts (async is preferred)
+COPY --chown=$UID:$GID ./start-with-async-env.sh /app/start-with-async-env.sh
 COPY --chown=$UID:$GID ./start-with-tailscale.sh /app/start-with-tailscale.sh
-RUN chmod +x /app/start-with-tailscale.sh
+RUN chmod +x /app/start-with-async-env.sh /app/start-with-tailscale.sh
+
+# Create tmp directory for async status files
+RUN mkdir -p /tmp && chown -R $UID:$GID /tmp
 
 EXPOSE 8080
 
-HEALTHCHECK CMD curl --silent --fail http://localhost:${PORT:-8080}/health | jq -ne 'input.status == true' || exit 1
+# IMPROVED HEALTHCHECK: Longer timeout and start period for async environment loading
+HEALTHCHECK --interval=15s --timeout=30s --start-period=90s --retries=8 \
+    CMD curl --silent --fail --max-time 10 http://localhost:${PORT:-8080}/health | jq -ne 'input.status == true' || exit 1
 
 # Permission hardening for OpenShift
 RUN set -eux; \
@@ -158,4 +171,5 @@ ARG BUILD_HASH
 ENV WEBUI_BUILD_VERSION=${BUILD_HASH}
 ENV DOCKER=true
 
-CMD ["/app/start-with-tailscale.sh"]
+# USE ASYNC STARTUP SCRIPT - FIXES RAILWAY HEALTHCHECK FAILURES
+CMD ["/app/start-with-async-env.sh"]
